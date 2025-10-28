@@ -130,33 +130,21 @@ static inline uint8_t gb_rom_read(struct gb_s *gb, const uint_fast32_t addr)
 
 void gb_lcd_draw_line(struct gb_s* gb, const uint8_t pixels[160], const uint_fast8_t line)
 {
-    // Your original code to fill the 160-pixel buffer. This is known to work.
-    for (int i = 0; i < 160; i++) {
-        line_buffer[i] = gb_color_map[pixels[i] & 3];
-    }
-
-    // Your original code to calculate the centered start coordinates. This is known to work.
-    uint16_t start_x = (320 - 160) / 2;
-    uint16_t start_y = (240 - 144) / 2;
-
-    // --- NEW LOGIC: DRAW EVERYTHING TWICE ---
-
-    // 1. Calculate the Y position for the top row of our scaled pixel.
-    uint16_t y0 = start_y + (line * 2);
-    // 2. Calculate the Y position for the bottom row of our scaled pixel.
-    uint16_t y1 = y0 + 1;
-
-    // 3. Draw the line at the top position (if it's on screen).
-    if (y0 < 240) {
-        ILI9341_SetAddress(start_x, y0, start_x + 159, y0);
-        ILI9341_WriteBuffer((uint8_t*)line_buffer, 160 * 2);
-    }
-
-    // 4. Draw the EXACT SAME line again at the bottom position (if it's on screen).
-    if (y1 < 240) {
-        ILI9341_SetAddress(start_x, y1, start_x + 159, y1);
-        ILI9341_WriteBuffer((uint8_t*)line_buffer, 160 * 2);
-    }
+	for (int i = 0; i < 160; i++) {
+		line_buffer[i] = gb_color_map[pixels[i] & 3];
+	}
+	uint16_t start_x = (320 - 160) / 2;
+	uint16_t start_y = 0;
+	uint16_t y0 = start_y + (line * 2);
+	uint16_t y1 = y0 + 1;
+	if (y0 < 240) {
+	    ILI9341_SetAddress(start_x, y0, start_x + 159, y0);
+	    ILI9341_WriteBuffer((uint8_t*)line_buffer, 160 * 2);
+	}
+	if (y1 < 240) {
+	    ILI9341_SetAddress(start_x, y1, start_x + 159, y1);
+	    ILI9341_WriteBuffer((uint8_t*)line_buffer, 160 * 2);
+	}
 }
 /* USER CODE END 0 */
 
@@ -201,7 +189,7 @@ int main(void)
   res = f_mount(&fs, "", 1);
   if (res != FR_OK) {}
 
-  res = f_open(&rom_file, "tetris.gb", FA_READ);
+  res = f_open(&rom_file, "mario.gb", FA_READ);
   if (res != FR_OK) {}
 
   rom_sector_valid = 0;
