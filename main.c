@@ -43,7 +43,7 @@
 #define GB_COLOR_DARK_GRAY  0x528A
 #define GB_COLOR_BLACK      0x0000
 
-#define ROM_BUFFER_SIZE 35000
+#define ROM_BUFFER_SIZE 70000
 
 //Button Pin Definitions ---
 #define BTN_UP_PORT     GPIOA
@@ -184,7 +184,7 @@ int main(void)
   }
 
   // 2. Load the ROM file into the buffer
-  const char* rom_filename = "tetris.gb";
+  const char* rom_filename = "mario.gb";
   char msg_buffer[50];
   snprintf(msg_buffer, sizeof(msg_buffer), "Loading %s...", rom_filename);
   ILI9341_DrawText(msg_buffer, FONT2, 10, 30, WHITE, BLACK);
