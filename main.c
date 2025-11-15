@@ -85,6 +85,7 @@ uint16_t line_buffer[160];
 static const uint16_t gb_color_map[4] = {
     GB_COLOR_WHITE, GB_COLOR_LIGHT_GRAY, GB_COLOR_DARK_GRAY, GB_COLOR_BLACK
 };
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -116,14 +117,44 @@ static inline uint8_t gb_rom_read_from_ram(struct gb_s *gb, const uint_fast32_t 
 // LCD drawing function remains the same
 void gb_lcd_draw_line(struct gb_s* gb, const uint8_t pixels[160], const uint_fast8_t line)
 {
-	for (int i = 0; i < 160; i++) {
-		line_buffer[i] = gb_color_map[pixels[i] & 3];
-	}
-	uint16_t start_x = (320 - 160) / 2;
-	uint16_t start_y = (240 - 144) / 2;
-	ILI9341_SetAddress(start_x, start_y + line, start_x + 159, start_y + line);
+    static uint16_t full_line_buffer[320];
 
-	ILI9341_WriteBuffer((uint8_t*)line_buffer, 160 * 2);
+    // --- Step 1: Draw the left 32-pixel black border ---
+    for (int i = 0; i < 32; i++)
+    {
+        full_line_buffer[i] = GB_COLOR_BLACK;
+    }
+
+    // --- Step 2: Draw the scaled game area (160px -> 256px) ---
+    // This uses the same fast, integer-only scaling algorithm.
+    // It will now map 160 source pixels into a 256 pixel destination space.
+    int source_x = 0;
+    int accumulator = 0;
+    for (int i = 0; i < 256; i++) // This loop now runs 256 times
+    {
+        uint16_t color = gb_color_map[pixels[source_x] & 3];
+        full_line_buffer[32 + i] = color;
+
+        // Use the accumulator to perform the 1.6x scaling
+        accumulator += 160; // Add the source width
+        if (accumulator >= 256) // Check against the new destination width (256)
+        {
+            accumulator -= 256; // Subtract the destination width
+            source_x++; // and advance to the next source pixel
+        }
+    }
+
+    // --- Step 3: Draw the right 32-pixel black border ---
+    for (int i = 32+ 256; i < 320; i++)
+    {
+        full_line_buffer[i] = GB_COLOR_BLACK;
+    }
+
+    // --- Step 4: Send the completed 320-pixel line to the LCD ---
+    uint16_t start_y = (240 - 144) / 2;
+
+    ILI9341_SetAddress(0, start_y + line, 319, start_y + line);
+    ILI9341_WriteBuffer((uint8_t*)full_line_buffer, 320 * 2);
 }
 void Error_Handler_LCD(const char* error_msg)
 {
