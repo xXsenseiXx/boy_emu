@@ -28,6 +28,7 @@
 #include "sd_functions.h"
 #include <stdio.h> // Required for snprintf
 #include <string.h> // Required for strcmp
+#define PEANUT_GB_HIGH_LCD_ACCURACY 0 // Add this line
 #include "peanut_gb.h"
 /* USER CODE END Includes */
 
@@ -45,15 +46,21 @@
 
 #define ROM_BUFFER_SIZE 70000
 
+
+#define LCD_WIDTH  320
+#define LCD_HEIGHT 240
+#define GB_WIDTH   160
+#define GB_HEIGHT  144
+
 //Button Pin Definitions ---
 #define BTN_UP_PORT     GPIOA
 #define BTN_UP_PIN      GPIO_PIN_8
 #define BTN_DOWN_PORT   GPIOA
 #define BTN_DOWN_PIN    GPIO_PIN_9
 #define BTN_LEFT_PORT   GPIOA
-#define BTN_LEFT_PIN    GPIO_PIN_10
+#define BTN_LEFT_PIN    GPIO_PIN_11
 #define BTN_RIGHT_PORT  GPIOA
-#define BTN_RIGHT_PIN   GPIO_PIN_11
+#define BTN_RIGHT_PIN   GPIO_PIN_10
 
 #define BTN_A_PORT      GPIOA
 #define BTN_A_PIN       GPIO_PIN_12
@@ -86,6 +93,23 @@ static const uint16_t gb_color_map[4] = {
     GB_COLOR_WHITE, GB_COLOR_LIGHT_GRAY, GB_COLOR_DARK_GRAY, GB_COLOR_BLACK
 };
 
+// Two buffers for DMA Double Buffering
+uint16_t dma_line_buffer[2][LCD_WIDTH];
+volatile uint8_t buffer_index = 0;       // Which buffer is the CPU writing to?
+volatile uint8_t spi_dma_busy = 0;       // Is DMA currently transmitting?
+// Vertical Scaling Accumulator
+int v_accumulator = 0;
+
+// --- MENU DEFINITIONS ---
+const char *game_list[] = {
+    "mario.gb",
+    "castalvania.gb",
+    "tetris.gb",
+    "Dr. Mario.gb"
+};
+
+// Calculate number of games automatically
+const uint8_t TOTAL_GAMES = sizeof(game_list) / sizeof(game_list[0]);
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -101,6 +125,12 @@ void update_joypad_state(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    if (hspi->Instance == SPI1) {
+        spi_dma_busy = 0;
+    }
+}
 static inline uint8_t gb_rom_read_from_ram(struct gb_s *gb, const uint_fast32_t addr)
 {
     // Check that the address is within the bounds of the loaded ROM
@@ -117,44 +147,54 @@ static inline uint8_t gb_rom_read_from_ram(struct gb_s *gb, const uint_fast32_t 
 // LCD drawing function remains the same
 void gb_lcd_draw_line(struct gb_s* gb, const uint8_t pixels[160], const uint_fast8_t line)
 {
-    static uint16_t full_line_buffer[320];
+    // 1. VERTICAL SCALING LOGIC
+    // We want to stretch 144 GB lines to 240 LCD lines.
+    // Ratio is 1.66. We add 240 to accumulator every GB line.
+    // While accumulator >= 144, we send a line to LCD and subtract 144.
 
-    // --- Step 1: Draw the left 32-pixel black border ---
-    for (int i = 0; i < 32; i++)
+    v_accumulator += LCD_HEIGHT;
+
+    // If we don't need to draw this line yet (unlikely with upscaling, but good safety)
+    if (v_accumulator < GB_HEIGHT) return;
+
+    // 2. HORIZONTAL SCALING (160 -> 320)
+    // This is the CPU intensive part, so we do it while the *previous* DMA might still be running.
+    // We write to the "current" buffer (buffer_index).
+
+    uint16_t *dest = dma_line_buffer[buffer_index];
+
+    // Unrolling loop for speed: Pixel doubling 160 -> 320
+    for (int i = 0; i < 160; i++)
     {
-        full_line_buffer[i] = GB_COLOR_BLACK;
+        uint16_t color = gb_color_map[pixels[i] & 3];
+        // Write pixel twice to stretch width
+        *dest++ = color;
+        *dest++ = color;
     }
 
-    // --- Step 2: Draw the scaled game area (160px -> 256px) ---
-    // This uses the same fast, integer-only scaling algorithm.
-    // It will now map 160 source pixels into a 256 pixel destination space.
-    int source_x = 0;
-    int accumulator = 0;
-    for (int i = 0; i < 256; i++) // This loop now runs 256 times
-    {
-        uint16_t color = gb_color_map[pixels[source_x] & 3];
-        full_line_buffer[32 + i] = color;
+    // 3. DMA TRANSFER LOOP
+    // Depending on the vertical scaling, we might need to send this ONE GB line
+    // to the LCD multiple times (usually 1 or 2 times).
 
-        // Use the accumulator to perform the 1.6x scaling
-        accumulator += 160; // Add the source width
-        if (accumulator >= 256) // Check against the new destination width (256)
-        {
-            accumulator -= 256; // Subtract the destination width
-            source_x++; // and advance to the next source pixel
-        }
+    while (v_accumulator >= GB_HEIGHT)
+    {
+        // Wait for previous DMA to finish if it's still busy
+        while (spi_dma_busy) {};
+
+        // Set Busy Flag
+        spi_dma_busy = 1;
+
+        // Send the current buffer via DMA
+        // Note: We are sending 320 pixels * 2 bytes = 640 bytes
+        HAL_SPI_Transmit_DMA(&hspi1, (uint8_t*)dma_line_buffer[buffer_index], LCD_WIDTH * 2);
+
+        // Decrease accumulator
+        v_accumulator -= GB_HEIGHT;
     }
 
-    // --- Step 3: Draw the right 32-pixel black border ---
-    for (int i = 32+ 256; i < 320; i++)
-    {
-        full_line_buffer[i] = GB_COLOR_BLACK;
-    }
-
-    // --- Step 4: Send the completed 320-pixel line to the LCD ---
-    uint16_t start_y = (240 - 144) / 2;
-
-    ILI9341_SetAddress(0, start_y + line, 319, start_y + line);
-    ILI9341_WriteBuffer((uint8_t*)full_line_buffer, 320 * 2);
+    // Flip buffer index for the next line so CPU can write to the other buffer
+    // while DMA finishes sending the current one.
+    buffer_index = !buffer_index;
 }
 void Error_Handler_LCD(const char* error_msg)
 {
@@ -166,6 +206,79 @@ void Error_Handler_LCD(const char* error_msg)
         // Blink an LED or just hang
         HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
         HAL_Delay(200);
+    }
+}
+int select_game_menu(void)
+{
+    int selected_index = 0;
+    uint8_t prev_joypad = 0xFF; // Store previous state for edge detection
+    uint8_t redraw = 1;         // Flag to prevent flickering
+
+    ILI9341_FillScreen(BLACK);
+    ILI9341_DrawText("SELECT GAME", FONT4, 60, 10, WHITE, BLACK);
+
+
+    while (1)
+    {
+        // 1. Input Handling
+        update_joypad_state();
+        uint8_t joy = gb_instance.direct.joypad;
+
+        // Logic 0 means pressed in PeanutGB joypad mapping
+        int up_pressed    = !(joy & JOYPAD_UP);
+        int down_pressed  = !(joy & JOYPAD_DOWN);
+        int a_pressed     = !(joy & JOYPAD_A);
+        int start_pressed = !(joy & JOYPAD_START);
+
+        // Navigation (with simple delay for debounce)
+        if (up_pressed)
+        {
+            selected_index--;
+            if (selected_index < 0) selected_index = TOTAL_GAMES - 1;
+            redraw = 1;
+            HAL_Delay(150); // Slow down scrolling
+        }
+
+        if (down_pressed)
+        {
+            selected_index++;
+            if (selected_index >= TOTAL_GAMES) selected_index = 0;
+            redraw = 1;
+            HAL_Delay(150);
+        }
+
+        // Selection
+        if (a_pressed || start_pressed)
+        {
+            // Visual feedback
+            ILI9341_DrawText("Loading...", FONT4, 80, 200, GREEN, BLACK);
+            HAL_Delay(500);
+            return selected_index;
+        }
+
+        // 2. Drawing Logic
+        if (redraw)
+        {
+            for (int i = 0; i < TOTAL_GAMES; i++)
+            {
+                uint16_t color = (i == selected_index) ? YELLOW : WHITE;
+                uint16_t bg    = BLACK;
+
+                char buffer[30];
+                // Add a cursor ">" for the selected item
+                if (i == selected_index) {
+                    snprintf(buffer, sizeof(buffer), "> %s", game_list[i]);
+                } else {
+                    snprintf(buffer, sizeof(buffer), "  %s", game_list[i]);
+                }
+
+                // Draw list starting at Y=60, spacing 20 pixels
+                ILI9341_DrawText(buffer, FONT2, 20, 60 + (i * 20), color, bg);
+            }
+            redraw = 0;
+        }
+
+        HAL_Delay(10); // Small delay to save power
     }
 }
 /* USER CODE END 0 */
@@ -214,8 +327,11 @@ int main(void)
       Error_Handler_LCD("SD Card Mount Failed!");
   }
 
+  int game_idx = select_game_menu();
+  const char* rom_filename = game_list[game_idx];
+
   // 2. Load the ROM file into the buffer
-  const char* rom_filename = "mario.gb";
+  //const char* rom_filename = "castalvania.gb";
   char msg_buffer[50];
   snprintf(msg_buffer, sizeof(msg_buffer), "Loading %s...", rom_filename);
   ILI9341_DrawText(msg_buffer, FONT2, 10, 30, WHITE, BLACK);
@@ -266,8 +382,45 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	update_joypad_state();    // Read button states
-	gb_run_frame(&gb_instance); // Run one frame of the emulator
+	  update_joypad_state();
+
+	        // --- RENDER FRAME ---
+
+	        // 1. Reset Vertical Accumulator for the new frame
+	        v_accumulator = 0;
+	        buffer_index = 0;
+
+	        // 2. Set LCD Window to Full Screen ONCE per frame
+	        // This saves massive overhead compared to setting it per line
+	        ILI9341_SetAddress(0, 0, LCD_WIDTH - 1, LCD_HEIGHT - 1);
+
+	        // Prepare ILI9341 for data stream (Write RAM command)
+	        // You might need to expose the WriteRAM command from your library
+	        // typically it is command 0x2C.
+	        ILI9341_WriteCommand(0x2C);
+
+	        // Set CS Low manually to keep stream open (if library handles CS per byte, this optimizes it)
+	        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_RESET);
+	        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
+	        //HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, PinState)
+
+	        // 3. Run Emulator for one frame (Draws lines)
+	        gb_instance.direct.frame_skip = 0; // Draw every frame we process
+	        gb_run_frame(&gb_instance);
+
+	        // 4. Wait for the very last DMA to finish before closing the frame
+	        while (spi_dma_busy) {};
+
+	        // Deselect CS
+	        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_RESET);
+
+	        // --- FRAME SKIPPING LOGIC ---
+	        // If the emulator is still too slow, we process a "blind" frame
+	        // without drawing to catch up on audio/game logic.
+
+	        update_joypad_state();
+	        gb_instance.direct.frame_skip = 1; // Don't draw
+	        gb_run_frame(&gb_instance);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -382,7 +535,7 @@ static void MX_SPI2_Init(void)
   hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi2.Init.NSS = SPI_NSS_SOFT;
-  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
   hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
